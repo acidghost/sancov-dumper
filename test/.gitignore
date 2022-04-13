@@ -1,0 +1,4 @@
+sample
+sample-cov
+*.ll
+*.o
