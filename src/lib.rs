@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
+use nix::sys::signal::{self as sig, signal, SigHandler};
 use serde::Serialize;
 
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ extern "C" fn __sanitizer_cov_trace_pc_guard_init(start: *mut u32, stop: *mut u3
         return;
     }
 
-    println!("INIT: {:p} {:p}", start, stop);
+    println!("[sancov-dumper] INIT: {:p} {:p}", start, stop);
 
     let mut x = start;
     while x < stop {
@@ -37,8 +38,21 @@ extern "C" fn __sanitizer_cov_trace_pc_guard_init(start: *mut u32, stop: *mut u3
         }
     }
 
-    unsafe {
-        libc::atexit(__dumper_death);
+    if unsafe { nix::libc::atexit(__dumper_death) } != 0 {
+        eprintln!("[sancov-dumper] failed to set atexit handler!");
+    }
+
+    if std::env::var("SANCOV_SKIP_SIGNALS").is_err() {
+        let shandle = SigHandler::Handler(__catch_signal);
+        if let Err(e) = unsafe {
+            signal(sig::SIGUSR1, shandle)
+                .and_then(|_| signal(sig::SIGINT, shandle))
+                .and_then(|_| signal(sig::SIGSEGV, shandle))
+                .and_then(|_| signal(sig::SIGABRT, shandle))
+                .and_then(|_| signal(sig::SIGTERM, shandle))
+        } {
+            eprintln!("[sancov-dumper] failed to set signal handlers: {}", e);
+        }
     }
 }
 
@@ -49,6 +63,13 @@ extern "C" fn __sanitizer_cov_trace_pc_guard(guard: *mut u32) {
     }
     // println!("guard: {:p} {:X}", guard, unsafe { *guard });
     *MAP.lock().unwrap().entry(unsafe { *guard }).or_insert(0) += 1;
+}
+
+#[no_mangle]
+extern "C" fn __catch_signal(signal: i32) {
+    println!("[sancov-dumper] received signal {}", signal);
+    __dumper_death();
+    unsafe { nix::libc::_exit(0) };
 }
 
 #[no_mangle]
